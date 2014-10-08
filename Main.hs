@@ -3,19 +3,18 @@
 module Main where
 
 import Control.Monad
-
-import System.IO (hIsTerminalDevice, stdout)
-import System.Directory
-
 import Control.Exception
+
+import Data.Maybe (isJust)
 
 import qualified Data.Text as T
 import qualified Data.Text.IO as T
 import Data.Text (Text)
-
 import Data.String (fromString)
-
 import Data.Monoid
+
+import System.IO (hIsTerminalDevice, stdout)
+import System.Directory
 
 import Network.RTorrent
 import Options.Applicative
@@ -105,6 +104,7 @@ data Opts = Opts {
   , doExec :: Maybe String
   , quiet :: Bool
   , load :: Maybe String
+  , forceColor :: Bool
 }
 
 parse :: Parser Opts
@@ -114,8 +114,8 @@ parse = Opts
             <> help "Show files")
     <*> optional (strOption $
             short 't'
-            <> metavar "TORRENT"
-            <> help "Filter by torrent name")
+            <> metavar "torrent"
+            <> help "Filter by torrent name (checks substrings)")
     <*> optional (option auto $
             short 'i'
             <> metavar "ID"
@@ -126,8 +126,8 @@ parse = Opts
     <*> optional (strOption $
             short 'e'
             <> long "exec"
-            <> metavar "PROGRAM"
-            <> help "Run program on the first matching file on the last torrent")
+            <> metavar "program"
+            <> help "Run program on the first file on the last matching torrent")
     <*> switch (
             short 'q'
             <> help "Be quiet")
@@ -136,14 +136,18 @@ parse = Opts
             <> long "load"
             <> metavar "torrent"
             <> help "Load a new torrent")
+    <*> switch (
+            long "color"
+            <> help "Force colors on"
+        )
 
 checkId :: Int -> (Int, a) -> Bool
 checkId i (j, _) = i == j
 
-checkName :: Text -> TorrentInfo :*: [FileI] -> Bool
-checkName find (t :*: _) = find `T.isInfixOf` str
+checkName :: Text -> a :*: String -> Bool
+checkName find (_ :*: t) = find `T.isInfixOf` str
   where
-    str = T.toLower . convert $ torrentName t
+    str = T.toLower . convert $ t
 
 shFile :: FilePath
 shFile = ".rc_sh"
@@ -159,23 +163,33 @@ main = do
 
     let parserOpts = info (helper <*> parse)
           ( fullDesc
-         <> progDesc "RTorrent cli interface"
          <> header "RC - rtorrent cli remote control")
     opts <- execParser parserOpts
 
-    colorize <- hIsTerminalDevice stdout
+    colorize <- (forceColor opts ||) <$> hIsTerminalDevice stdout
 
-    Right torrents <- call $
-            allTorrents (getTorrent <+> getTorrentFiles) 
+    Right torrentNames <- call (allTorrents (getTorrentId <+> getTorrentName))
+
     let mkFilt = maybe (const True) 
-    let afterFilter = mkFilt checkId (idFilt opts)
     let beforeFilter = mkFilt checkName (fmap (T.toLower . convert) $ nameFilt opts)
-    let fTorrents = filter afterFilter . zip [1..] . filter beforeFilter $
-            torrents
+    let afterFilter = mkFilt checkId (idFilt opts)
+    let torrentsToGet = map snd
+                        . filter afterFilter 
+                        . zip [1..] 
+                        . filter beforeFilter
+                        $ torrentNames
+
+    let filesRequired = isJust (doExec opts) || showFiles opts
+    let getData = if filesRequired 
+            then getTorrent <+> getTorrentFiles
+            else fmap (:*: []) . getTorrent
+
+    Right torrents <- fmap (fmap (zip [1..])) $ 
+                        call (map (\(i :*: _) -> getData i) torrentsToGet)
 
     unless (quiet opts) $ 
        mapM_ (renderTorrent colorize (showFiles opts))
-            fTorrents
+            torrents
 
     case load opts of
         Just file -> do
@@ -186,7 +200,7 @@ main = do
             return ()
         Nothing -> return ()
 
-    case reverse fTorrents of
+    case reverse torrents of
         ((_, t :*: (f:_)) : _) -> do
             let dir = convert $ torrentDir t 
             let file = convert $ filePath f
