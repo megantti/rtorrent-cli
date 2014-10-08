@@ -55,7 +55,7 @@ colorBs (Color c) s = (fromString c) <> s <> "\x1b[39;49m"
 type FileI = FileInfo
 
 convert :: String -> Text
-convert = T.decodeUtf8 . fromString
+convert = fromString
 
 renderFile :: (Color -> Text -> Text) -> FileI -> IO ()
 renderFile colorize file =
