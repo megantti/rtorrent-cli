@@ -11,7 +11,6 @@ import Control.Exception
 
 import qualified Data.Text as T
 import qualified Data.Text.IO as T
-import qualified Data.Text.Encoding as T
 import Data.Text (Text)
 
 import Data.String (fromString)
@@ -64,7 +63,10 @@ renderFile colorize file =
     T.putStrLn $ "\t\t" <> path <> " [" <> colorize cyan (fromString $ show p) <> "%]"
   where
     path = convert $ filePath file
-    p = (100 * fileCompletedChunks file) `div` fileSizeChunks file
+    ch = fileSizeChunks file
+    p = if ch == 0 
+           then 100 
+           else (100 * fileCompletedChunks file) `div` ch
 
 renderTorrent :: Bool -> Bool -> (Int, TorrentInfo :*: [FileI]) -> IO ()
 renderTorrent c files (i, torrent :*: fileData) =  do
