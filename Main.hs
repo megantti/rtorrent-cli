@@ -160,8 +160,7 @@ main = do
     let mkFilt = maybe (const True) 
     let beforeFilter = mkFilt checkName (map toLower <$> nameFilt opts)
     let afterFilter = mkFilt checkId (idFilt opts)
-    let torrentsToGet = map snd
-                        . filter afterFilter 
+    let torrentsToGet = filter afterFilter 
                         . zip [1..] 
                         . filter beforeFilter
                         $ torrentNames
@@ -171,8 +170,8 @@ main = do
             then getTorrent <+> getTorrentFiles
             else fmap (:*: []) . getTorrent
 
-    Right torrents <- fmap (zip [1..]) <$> 
-                        call (map (\(i :*: _) -> getData i) torrentsToGet)
+    Right torrents <- call (
+        map (\(k, tId :*: _) -> (\d -> (k, d)) <$> getData tId) torrentsToGet)
 
     unless (quiet opts) $ 
        mapM_ (renderTorrent colorize (showFiles opts))
@@ -191,12 +190,12 @@ main = do
         ((_, t :*: files) : _) -> do
             let dir = torrentDir t 
             writeFile shFilePath $ 
-                  (if doCd opts then "cd '" <> dir <> "'\n" else "")
+              (if doCd opts then "cd '" <> dir <> "'\n" else "")
               <> case (files, doExec opts) of
-                    (f : _, Just program) -> program <> " '" 
-                                       <> dir <> "/" 
-                                       <> filePath f
-                                       <> "'"   
-                        
+                    (f : _, Just program) -> 
+                          program <> " '" 
+                          <> dir <> "/" 
+                          <> filePath f
+                          <> "'"   
                     _ -> ""
         _ -> return ()
