@@ -1,4 +1,4 @@
-{-# LANGUAGE TypeOperators, OverloadedStrings #-}
+{-# LANGUAGE TypeOperators, OverloadedStrings, ScopedTypeVariables #-}
 
 module Main where
 
@@ -6,6 +6,8 @@ import Control.Monad
 
 import System.IO (hIsTerminalDevice, stdout)
 import System.Directory
+
+import Control.Exception
 
 import qualified Data.Text as T
 import qualified Data.Text.IO as T
@@ -176,6 +178,8 @@ main = do
     case load opts of
         Just file -> do
             path <- canonicalizePath file
+                    `catch` (\(e :: IOException) -> 
+                                return file)
             _ <- call $ loadStartTorrent path
             return ()
         Nothing -> return ()

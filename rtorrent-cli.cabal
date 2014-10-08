@@ -18,7 +18,7 @@ cabal-version:       >=1.10
 executable rcrc
   main-is:             Main.hs
   -- other-modules:       
-  other-extensions:    TypeOperators, OverloadedStrings
+  other-extensions:    TypeOperators, OverloadedStrings, ScopedTypeVariables
   build-depends:       base >=4.7 && <4.8, rtorrent-rpc >=0.2.0.1 && <0.3, optparse-applicative >=0.10 && <0.12,
                        directory,
                        text, bytestring
