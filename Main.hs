@@ -6,11 +6,8 @@ import Control.Monad
 import Control.Exception
 
 import Data.Maybe (isJust)
-
-import qualified Data.Text as T
-import qualified Data.Text.IO as T
-import Data.Text (Text)
-import Data.String (fromString)
+import Data.List (isInfixOf)
+import Data.Char (toLower)
 import Data.Monoid
 
 import System.IO (hIsTerminalDevice, stdout)
@@ -48,20 +45,13 @@ cyan = makeFg 6
 colorStr :: Color -> String -> String
 colorStr (Color c) s = c ++ s ++ "\x1b[39;49m"
 
-
-colorBs :: Color -> Text -> Text
-colorBs (Color c) s = (fromString c) <> s <> "\x1b[39;49m"
-
 type FileI = FileInfo
 
-convert :: String -> Text
-convert = fromString
-
-renderFile :: (Color -> Text -> Text) -> FileI -> IO ()
+renderFile :: (Color -> String -> String) -> FileI -> IO ()
 renderFile colorize file =
-    T.putStrLn $ "\t\t" <> path <> " [" <> colorize cyan (fromString $ show p) <> "%]"
+    putStrLn $ "\t\t" <> path <> " [" <> colorize cyan (show p) <> "%]"
   where
-    path = convert $ filePath file
+    path = filePath file
     ch = fileSizeChunks file
     p = if ch == 0 
            then 100 
@@ -69,32 +59,31 @@ renderFile colorize file =
 
 renderTorrent :: Bool -> Bool -> (Int, TorrentInfo :*: [FileI]) -> IO ()
 renderTorrent c files (i, torrent :*: fileData) =  do
-    T.putStrLn $ colorB magenta (fromString $ show i) <> ". " <> name <> ":"
+    putStrLn $ color magenta (show i) <> ". " <> name <> ":"
     putStrLn $ "      " ++ sizeS ++ 
-                "\t[" ++ colorS cyan (show percent) ++ "%]:\t"
+                "\t[" ++ color cyan (show percent) ++ "%]:\t"
                ++ status
     when files $ do
-        T.putStrLn path 
-        mapM_ (renderFile colorB) fileData
+        putStrLn path 
+        mapM_ (renderFile color) fileData
   where
-    path = "\tIn: " <> colorB yellow (convert $ torrentDir torrent)
+    path = "\tIn: " <> color yellow (torrentDir torrent)
 
-    colorS = if c then colorStr else const id
-    colorB = if c then colorBs else const id
+    color = if c then colorStr else const id
 
-    name = convert $ torrentName torrent
+    name = torrentName torrent
     size = torrentSize torrent
     compl = size - torrentBytesLeft torrent
     percent = (100 * compl) `div` size
     up = torrentUpRate torrent
     down = torrentDownRate torrent
-    sizeS = colorS yellow (show (toMB compl)) ++ " MB / " 
-                ++ colorS yellow (show (toMB size)) ++ " MB"
+    sizeS = color yellow (show (toMB compl)) ++ " MB / " 
+                ++ color yellow (show (toMB size)) ++ " MB"
     status = 
         if torrentOpen torrent
-           then "Up: " ++ colorS green (show (toKB up)) 
-                ++ " KB | Down: " ++ colorS green (show (toKB down)) ++ " KB"
-           else colorS red $ "CLOSED"
+           then "Up: " ++ color green (show (toKB up)) 
+                ++ " KB | Down: " ++ color green (show (toKB down)) ++ " KB"
+           else color red "CLOSED"
 
 data Opts = Opts { 
     showFiles :: Bool
@@ -144,10 +133,8 @@ parse = Opts
 checkId :: Int -> (Int, a) -> Bool
 checkId i (j, _) = i == j
 
-checkName :: Text -> a :*: String -> Bool
-checkName find (_ :*: t) = find `T.isInfixOf` str
-  where
-    str = T.toLower . convert $ t
+checkName :: String -> a :*: String -> Bool
+checkName find (_ :*: t) = find `isInfixOf` map toLower t
 
 shFile :: FilePath
 shFile = ".rc_sh"
@@ -171,7 +158,7 @@ main = do
     Right torrentNames <- call (allTorrents (getTorrentId <+> getTorrentName))
 
     let mkFilt = maybe (const True) 
-    let beforeFilter = mkFilt checkName (fmap (T.toLower . convert) $ nameFilt opts)
+    let beforeFilter = mkFilt checkName (map toLower <$> nameFilt opts)
     let afterFilter = mkFilt checkId (idFilt opts)
     let torrentsToGet = map snd
                         . filter afterFilter 
@@ -184,7 +171,7 @@ main = do
             then getTorrent <+> getTorrentFiles
             else fmap (:*: []) . getTorrent
 
-    Right torrents <- fmap (fmap (zip [1..])) $ 
+    Right torrents <- fmap (zip [1..]) <$> 
                         call (map (\(i :*: _) -> getData i) torrentsToGet)
 
     unless (quiet opts) $ 
@@ -194,23 +181,22 @@ main = do
     case load opts of
         Just file -> do
             path <- canonicalizePath file
-                    `catch` (\(e :: IOException) -> 
+                    `catch` (\(_ :: IOException) -> 
                                 return file)
             _ <- call $ loadStartTorrent path
             return ()
         Nothing -> return ()
 
     case reverse torrents of
-        ((_, t :*: (f:_)) : _) -> do
-            let dir = convert $ torrentDir t 
-            let file = convert $ filePath f
-            T.writeFile shFilePath $ 
+        ((_, t :*: files) : _) -> do
+            let dir = torrentDir t 
+            writeFile shFilePath $ 
                   (if doCd opts then "cd '" <> dir <> "'\n" else "")
-              <> case doExec opts of
-                    Just program -> T.pack program <> " '" 
+              <> case (files, doExec opts) of
+                    (f : _, Just program) -> program <> " '" 
                                        <> dir <> "/" 
-                                       <> file
+                                       <> filePath f
                                        <> "'"   
                         
-                    Nothing -> ""
+                    _ -> ""
         _ -> return ()
