@@ -5,7 +5,7 @@ module Main where
 import Control.Monad
 
 import System.IO (hIsTerminalDevice, stdout)
-import System.Environment (getEnv)
+import System.Directory
 
 import qualified Data.Text as T
 import qualified Data.Text.IO as T
@@ -100,6 +100,7 @@ data Opts = Opts {
   , doCd :: Bool
   , doExec :: Maybe String
   , quiet :: Bool
+  , load :: Maybe String
 }
 
 parse :: Parser Opts
@@ -126,6 +127,11 @@ parse = Opts
     <*> switch (
             short 'q'
             <> help "Be quiet")
+    <*> optional (strOption $
+            short 'l'
+            <> long "load"
+            <> metavar "torrent"
+            <> help "Load a new torrent")
 
 checkId :: Int -> (Int, a) -> Bool
 checkId i (j, _) = i == j
@@ -138,9 +144,12 @@ checkName find (t :*: _) = find `T.isInfixOf` str
 shFile :: FilePath
 shFile = ".rc_sh"
 
+call :: Command a => a -> IO (Either String (Ret a))
+call = callRTorrent "localhost" 5000
+
 main :: IO ()
 main = do
-    homeDir <- getEnv "HOME"
+    homeDir <- getHomeDirectory
     let shFilePath = homeDir ++ "/" ++ shFile
     writeFile shFilePath ""
 
@@ -152,7 +161,7 @@ main = do
 
     colorize <- hIsTerminalDevice stdout
 
-    Right torrents <- callRTorrent "localhost" 5000 $
+    Right torrents <- call $
             allTorrents (getTorrent <+> getTorrentFiles) 
     let mkFilt = maybe (const True) 
     let afterFilter = mkFilt checkId (idFilt opts)
@@ -163,6 +172,13 @@ main = do
     unless (quiet opts) $ 
        mapM_ (renderTorrent colorize (showFiles opts))
             fTorrents
+
+    case load opts of
+        Just file -> do
+            path <- canonicalizePath file
+            _ <- call $ loadStartTorrent path
+            return ()
+        Nothing -> return ()
 
     case reverse fTorrents of
         ((_, t :*: (f:_)) : _) -> do
