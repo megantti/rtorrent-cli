@@ -5,133 +5,113 @@ module Main where
 import Control.Monad
 import Control.Exception
 
-import Data.Maybe (isJust)
-import Data.List (isInfixOf)
+import Data.Maybe (isJust, isNothing, fromMaybe)
+import Data.List (isInfixOf, intercalate)
+import Data.List.Split (splitOn)
 import Data.Char (toLower)
 import Data.Monoid
 
 import System.IO (hIsTerminalDevice, stdout)
 import System.Directory
+import System.Environment (lookupEnv)
+
+import Data.Traversable (traverse)
 
 import Network.RTorrent
+import Network.RTorrent.Action.Internals (simpleAction)
 import Options.Applicative
-    
-toMB :: Int -> Int
-toMB = (`div` (1024*1024))
 
-toKB :: Int -> Int
-toKB = (`div` 1024)
-
-newtype Color = Color String
-
-makeFg :: Int -> Color
-makeFg i = Color $ "\x1b[3" ++ show i ++ "m"
-
-red :: Color
-red = makeFg 1
-
-green :: Color
-green = makeFg 2
-
-yellow :: Color
-yellow  = makeFg 3
-
-magenta :: Color
-magenta = makeFg 5
-
-cyan :: Color
-cyan = makeFg 6
-
-colorStr :: Color -> String -> String
-colorStr (Color c) s = c ++ s ++ "\x1b[39;49m"
-
-type FileI = FileInfo
-
-renderFile :: (Color -> String -> String) -> FileI -> IO ()
-renderFile colorize file =
-    putStrLn $ "\t\t" <> path <> " [" <> colorize cyan (show p) <> "%]"
-  where
-    path = filePath file
-    ch = fileSizeChunks file
-    p = if ch == 0 
-           then 100 
-           else (100 * fileCompletedChunks file) `div` ch
-
-renderTorrent :: Bool -> Bool -> (Int, TorrentInfo :*: [FileI]) -> IO ()
-renderTorrent c files (i, torrent :*: fileData) =  do
-    putStrLn $ color magenta (show i) <> ". " <> name <> ":"
-    putStrLn $ "      " ++ sizeS ++ 
-                "\t[" ++ color cyan (show percent) ++ "%]:\t"
-               ++ status
-    when files $ do
-        putStrLn path 
-        mapM_ (renderFile color) fileData
-  where
-    path = "\tIn: " <> color yellow (torrentDir torrent)
-
-    color = if c then colorStr else const id
-
-    name = torrentName torrent
-    size = torrentSize torrent
-    compl = size - torrentBytesLeft torrent
-    percent = (100 * compl) `div` size
-    up = torrentUpRate torrent
-    down = torrentDownRate torrent
-    sizeS = color yellow (show (toMB compl)) ++ " MB / " 
-                ++ color yellow (show (toMB size)) ++ " MB"
-    status = 
-        if torrentOpen torrent
-           then "Up: " ++ color green (show (toKB up)) 
-                ++ " KB | Down: " ++ color green (show (toKB down)) ++ " KB"
-           else color red "CLOSED"
+import Render
 
 data Opts = Opts { 
     showFiles :: Bool
-  , nameFilt :: Maybe String
-  , idFilt :: Maybe Int
-  , doCd :: Bool
-  , doExec :: Maybe String
+  , nameFilt :: String
+  , idFilt :: Int -> Bool
   , quiet :: Bool
-  , load :: Maybe String
+  , verbose :: Bool
   , forceColor :: Bool
+  , cmd :: Maybe RCommand
 }
+
+data RCommand = 
+      CCD 
+    | CStop
+    | CStart
+    | CDelete
+    | CExec String [String]
+    | CLoad String
+
+parseIdList :: String -> ReadM (Int -> Bool)
+parseIdList = fmap (\fs i -> any ($i) fs) 
+            . traverse check . splitOn ","
+  where
+    readInt :: String -> ReadM Int
+    readInt str = case reads str of
+        [(i, "")] -> pure i
+        _         -> readerError "Trash found in ID"
+    check = cases . splitOn "-" 
+      where
+        cases c = case c of
+            ["", a] -> (\e i -> i <= e) <$> readInt a
+            [a, ""] -> (\s i -> s <= i) <$> readInt a
+            [a,  b] -> (\s e i -> s <= i && i <= e) 
+                        <$> readInt a
+                        <*> readInt b
+            [a]     -> (==) <$> readInt a
+            _       -> readerError "Trash found in ID"
 
 parse :: Parser Opts
 parse = Opts
     <$> switch (
             short 'f'
             <> help "Show files")
-    <*> optional (strOption $
+    <*> strOption (
             short 't'
+            <> value ""
             <> metavar "torrent"
             <> help "Filter by torrent name (checks substrings)")
-    <*> optional (option auto $
+    <*> option (str >>= parseIdList) (
             short 'i'
+            <> value (const True)
             <> metavar "ID"
-            <> help "Filter by id")
-    <*> switch (
-            short 'c'
-            <> help "CD into last matching dir")
-    <*> optional (strOption $
-            short 'e'
-            <> long "exec"
-            <> metavar "program"
-            <> help "Run program on the first file on the last matching torrent")
+            <> help "Filter by id, where -2,3-5,6,7- matches every id")
     <*> switch (
             short 'q'
-            <> help "Be quiet")
-    <*> optional (strOption $
-            short 'l'
-            <> long "load"
-            <> metavar "torrent"
-            <> help "Load a new torrent")
+            <> help "Be quiet, overrides verbose")
     <*> switch (
-            long "color"
-            <> help "Force colors on"
-        )
-
-checkId :: Int -> (Int, a) -> Bool
-checkId i (j, _) = i == j
+            short 'v'
+            <> help "Be verbose")
+    <*> switch (
+            short 'c'
+            <> long "color"
+            <> help "Force colors on")
+    <*> optional (
+          subparser (
+             command "load"   load
+          <> command "cd"     cd
+          <> command "exec"   exec
+          <> command "start"  start
+          <> command "stop"   stop
+          <> command "delete" delete
+        ))
+  where
+    load = info (helper <*> arg) $
+        progDesc "Load a new torrent file."
+      where 
+        arg = CLoad <$> strArgument (metavar "url")
+    cd = info (helper <*> pure CCD) $
+        progDesc "Change directory to base directory of a matching torrent."
+    start = info (helper <*> pure CStart) $
+        progDesc "Start torrents."
+    stop = info (helper <*> pure CStop) $
+        progDesc "Stop torrents."
+    delete = info (helper <*> pure CDelete) $
+        progDesc "Delete torrents."
+    exec = info (helper <*> (CExec <$> prg <*> many args)) $
+        progDesc "Execute a program on the first file of the last matching torrent."
+      where
+        prg = strArgument (metavar "program")
+        args = strArgument (metavar "args")
 
 checkName :: String -> a :*: String -> Bool
 checkName find (_ :*: t) = find `isInfixOf` map toLower t
@@ -140,7 +120,58 @@ shFile :: FilePath
 shFile = ".rc_sh"
 
 call :: Command a => a -> IO (Either String (Ret a))
-call = callRTorrent "localhost" 5000
+call command = do
+    host <- fromMaybe "localhost" . filterEmpty <$> lookupEnv "RT_HOST"
+    port <- checkPort =<< fromMaybe "5000" . filterEmpty <$> lookupEnv "RT_PORT"
+    callRTorrent host port command
+  where
+    filterEmpty (Just "") = Nothing
+    filterEmpty a = a
+    checkPort s = case reads s of
+        [(i, _)] -> return i
+        _ -> throwIO $ ErrorCall "RT_PORT is not an integer"
+
+addPath :: String -> IO ()
+addPath url = do
+    path <- canonicalizePath url
+            `catch` (\(_ :: IOException) -> 
+                        return url)
+    _ <- call $ loadStartTorrent path
+    return ()
+    
+changeDir :: String -> [(a, TorrentInfo :*: b)] -> IO ()
+changeDir shFilePath torrents = 
+    case reverse torrents of
+        ((_, t :*: _) : _) -> do
+            let dir = torrentDir t 
+            writeFile shFilePath $ "cd '" <> dir <> "'\n"
+        _ -> return ()
+
+exec :: String -> [String] -> String -> [(a, TorrentInfo :*: [FileInfo])] -> IO ()
+exec program args shFilePath torrents =
+    case reverse torrents of
+        ((_, t :*: (file : _)) : _) -> do
+            let dir = torrentDir t 
+            writeFile shFilePath $ 
+              intercalate " " (program : args)
+              <> " '" <> dir <> "/" 
+              <> filePath file
+              <> "'"   
+        _ -> return ()
+
+commandOn :: (TorrentId -> TorrentAction Int) -> [(a, TorrentInfo :*: b)] -> IO ()
+commandOn cmd torrents = void . call $
+    map (\(_, t :*: _) -> cmd (torrentId t)) torrents
+
+filesRequired :: Bool -> Opts -> Bool
+filesRequired doShow opts = (doShow && showFiles opts) || check (cmd opts)
+  where
+    check (Just (CExec _ _)) = True
+    check _ = False
+
+getRight :: Either String a -> IO a
+getRight (Right a) = return a
+getRight (Left e) = throwIO $ ErrorCall e 
 
 main :: IO ()
 main = do
@@ -150,52 +181,45 @@ main = do
 
     let parserOpts = info (helper <*> parse)
           ( fullDesc
-         <> header "RC - rtorrent cli remote control")
+         <> header "RC - rtorrent cli remote control"
+         <> footer ("Use environment variables RT_HOST and RT_PORT to "
+                   ++ "set host and port, the defaults are localhost and 5000. "
+                   ++ "Note that the commands act on all matching torrents.")
+         )
     opts <- execParser parserOpts
 
     colorize <- (forceColor opts ||) <$> hIsTerminalDevice stdout
 
-    Right torrentNames <- call (allTorrents (getTorrentId <+> getTorrentName))
+    torrentNames <- getRight =<< 
+                        call (allTorrents (getTorrentId <+> getTorrentName))
 
-    let mkFilt = maybe (const True) 
-    let beforeFilter = mkFilt checkName (map toLower <$> nameFilt opts)
-    let afterFilter = mkFilt checkId (idFilt opts)
+    let beforeFilter = checkName (map toLower $ nameFilt opts)
+    let afterFilter = idFilt opts . fst
     let torrentsToGet = filter afterFilter 
                         . zip [1..] 
                         . filter beforeFilter
                         $ torrentNames
 
-    let filesRequired = isJust (doExec opts) || showFiles opts
-    let getData = if filesRequired 
+    let doShow = (verbose opts || isNothing (cmd opts)) && (not $ quiet opts) 
+
+    let getData = if filesRequired doShow opts
             then getTorrent <+> getTorrentFiles
             else fmap (:*: []) . getTorrent
 
-    Right torrents <- call (
+    torrents <- getRight =<< call (
         map (\(k, tId :*: _) -> (\d -> (k, d)) <$> getData tId) torrentsToGet)
 
-    unless (quiet opts) $ 
+    when doShow $ 
        mapM_ (renderTorrent colorize (showFiles opts))
             torrents
 
-    case load opts of
-        Just file -> do
-            path <- canonicalizePath file
-                    `catch` (\(_ :: IOException) -> 
-                                return file)
-            _ <- call $ loadStartTorrent path
-            return ()
+    case cmd opts of
         Nothing -> return ()
-
-    case reverse torrents of
-        ((_, t :*: files) : _) -> do
-            let dir = torrentDir t 
-            writeFile shFilePath $ 
-              (if doCd opts then "cd '" <> dir <> "'\n" else "")
-              <> case (files, doExec opts) of
-                    (f : _, Just program) -> 
-                          program <> " '" 
-                          <> dir <> "/" 
-                          <> filePath f
-                          <> "'"   
-                    _ -> ""
-        _ -> return ()
+        Just c ->
+            case c of 
+              CLoad url -> addPath url
+              CCD -> changeDir shFilePath torrents
+              CExec prg args -> exec prg args shFilePath torrents
+              CStart -> commandOn start torrents
+              CStop -> commandOn closeStop torrents
+              CDelete -> commandOn erase torrents

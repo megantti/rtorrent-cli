@@ -14,11 +14,12 @@ cabal-version:       >=1.10
 
 executable rcrc
   main-is:             Main.hs
-  -- other-modules:       
+  other-modules:       Render
   other-extensions:    TypeOperators, OverloadedStrings, ScopedTypeVariables
   build-depends:       base >=4.7 && <4.8, 
-                       rtorrent-rpc >=0.2.0.1 && <0.3,
-                       optparse-applicative >=0.10 && <0.12,
-                       directory
+                       rtorrent-rpc >=0.2.1.0 && <0.3,
+                       optparse-applicative >=0.11 && <0.12,
+                       directory >= 1.2 && <1.3,
+                       split
   -- hs-source-dirs:      
   default-language:    Haskell2010
