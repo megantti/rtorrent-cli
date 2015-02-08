@@ -18,13 +18,14 @@ import System.Environment (lookupEnv)
 import Data.Traversable (traverse)
 
 import Network.RTorrent
-import Network.RTorrent.Action.Internals (simpleAction)
+import Network.RTorrent.Action (pureAction, simpleAction)
 import Options.Applicative
 
 import Render
 
 data Opts = Opts { 
     showFiles :: Bool
+  , showChunks :: Bool
   , nameFilt :: String
   , idFilt :: Int -> Bool
   , quiet :: Bool
@@ -40,6 +41,10 @@ data RCommand =
     | CDelete
     | CExec String [String]
     | CLoad String
+
+type ChunkInfo = Maybe [Bool] :*: Int
+
+type TInfo = TorrentInfo :*: [FileInfo] :*: ChunkInfo
 
 parseIdList :: String -> ReadM (Int -> Bool)
 parseIdList = fmap (\fs i -> any ($i) fs) 
@@ -65,6 +70,9 @@ parse = Opts
     <$> switch (
             short 'f'
             <> help "Show files")
+    <*> switch (
+            short 'u'
+            <> help "Show chunks")
     <*> strOption (
             short 't'
             <> value ""
@@ -147,10 +155,10 @@ changeDir shFilePath torrents =
             writeFile shFilePath $ "cd '" <> dir <> "'\n"
         _ -> return ()
 
-exec :: String -> [String] -> String -> [(a, TorrentInfo :*: [FileInfo])] -> IO ()
+exec :: String -> [String] -> String -> [(a, TorrentInfo :*: [FileInfo] :*: b)] -> IO ()
 exec program args shFilePath torrents =
     case reverse torrents of
-        ((_, t :*: (file : _)) : _) -> do
+        ((_, t :*: (file : _) :*: _) : _) -> do
             let dir = torrentDir t 
             writeFile shFilePath $ 
               intercalate " " (program : args)
@@ -202,15 +210,29 @@ main = do
 
     let doShow = (verbose opts || isNothing (cmd opts)) && (not $ quiet opts) 
 
-    let getData = if filesRequired doShow opts
-            then getTorrent <+> getTorrentFiles
-            else fmap (:*: []) . getTorrent
+    let getFiles = if filesRequired doShow opts
+            then getTorrentFiles
+            else pureAction []
+
+    let getChunks = if showChunks opts 
+            then getTorrentChunks <+> getTorrentChunkSize
+            else pureAction Nothing <+> pureAction 0
+
+    let getData = getTorrent
+                  <+> getFiles
+                  <+> getChunks
 
     torrents <- getRight =<< call (
         map (\(k, tId :*: _) -> (\d -> (k, d)) <$> getData tId) torrentsToGet)
 
+    let renderOpts = RenderOpts {
+        colorize = colorize
+      , renderFiles = showFiles opts
+      , renderChunks = showChunks opts
+    }
+
     when doShow $ 
-       mapM_ (renderTorrent colorize (showFiles opts))
+       mapM_ (renderTorrent renderOpts)
             torrents
 
     case cmd opts of

@@ -2,11 +2,14 @@
 
 module Render (
     renderTorrent
+  , RenderOpts (..)
 ) where
 
 import Control.Monad
+import Data.Maybe (isJust)
 import Data.Monoid
 import Network.RTorrent
+import Data.List.Split
     
 toMB :: Int -> Int
 toMB = (`div` (1024*1024))
@@ -37,29 +40,86 @@ cyan = makeFg 6
 colorStr :: Color -> String -> String
 colorStr (Color c) s = c ++ s ++ "\x1b[39;49m"
 
-renderFile :: (Color -> String -> String) -> FileInfo -> IO ()
-renderFile colorize file =
-    putStrLn $ "\t\t" <> path <> " [" <> colorize cyan (show p) <> "%]"
+data RenderOpts = RenderOpts {
+    colorize :: Bool
+  , renderFiles :: Bool
+  , renderChunks :: Bool
+}
+
+renderFile :: (Color -> String -> String) -> Bool -> FileInfo -> IO ()
+renderFile colorize hasChunks file =
+    if hasChunks
+        then do
+            putStrLn $ "\t\t"  <> path 
+            putStrLn $ "\t\t " <> colorize cyan (show size) <> " MB [" 
+                       <> colorize cyan (show p) <> "%]"
+        else 
+            putStrLn $ "\t\t" <> path 
+                              <> " [" <> colorize cyan (show p) <> "%]"
   where
+    size = toMB $ fileSizeBytes file
     path = filePath file
     ch = fileSizeChunks file
     p = if ch == 0 
            then 100 
            else (100 * fileCompletedChunks file) `div` ch
 
-renderTorrent :: Bool -> Bool -> (Int, TorrentInfo :*: [FileInfo]) -> IO ()
-renderTorrent c files (i, torrent :*: fileData) =  do
+renderAllFiles :: (Color -> String -> String) 
+               -> [FileInfo] 
+               -> Maybe [Bool] :*: Int
+               -> Bool
+               -> IO ()
+renderAllFiles colorize files (bits :*: chunkSize) renderChunks = do
+    let factor = max (2^20 `div` chunkSize) 1
+    let realSize = toKB $ chunkSize * factor
+    when renderChunks $
+        putStrLn $ "\t\t  (Bit: " <> show realSize <> "KB)"
+    forM_ files $ \file -> do
+      renderFile colorize renderChunks file
+      case bits of 
+        Just chunks -> let
+              start = fileOffset file `div` chunkSize
+              end = (fileSizeBytes file + fileOffset file) `div` chunkSize
+              len = end - start + 1
+              fileBits = take len . drop start $ chunks
+            in 
+              renderBitList "\t\t  " fileBits factor
+        Nothing -> return ()
+
+renderChunk :: Maybe [Bool] :*: Int -> IO ()
+renderChunk (Nothing :*: _) = return ()
+renderChunk (Just bits :*: chunkSize) = do
+    let factor = max (2^20 `div` chunkSize) 1
+    let realSize = (chunkSize * factor) `div` 1024
+    putStrLn $ "\t (Bit: " <> show realSize <> "KB)"
+    renderBitList "\t" bits factor
+
+renderBitList :: String -> [Bool] -> Int -> IO ()
+renderBitList start bits factor = do
+    let rows = chunksOf 8 . chunksOf 8. map and . chunksOf factor $ bits
+    forM_ rows $ \row -> do
+      putStr start
+      forM_ row $ \col -> do
+        putStr $ map (\t -> if t then '1' else '0') col
+        putStr " "
+      putStrLn ""
+
+renderTorrent :: RenderOpts -> (Int, TorrentInfo :*: [FileInfo] :*: Maybe [Bool] :*: Int) -> IO ()
+renderTorrent opts (i, torrent :*: fileData :*: chunkInfo) =  do
     putStrLn $ color magenta (show i) <> ". " <> name 
     putStrLn $ "      " ++ sizeS ++ 
                 "\t[" ++ color cyan (show percent) ++ "%]:\t"
                ++ status
-    when files $ do
+    when (renderFiles opts) $ do
         putStrLn path 
-        mapM_ (renderFile color) fileData
+        renderAllFiles color fileData chunkInfo (renderChunks opts)
+    when (renderChunks opts && not (renderFiles opts)) $ do
+        renderChunk chunkInfo
   where
+
     path = "\tIn: " <> color yellow (torrentDir torrent)
 
-    color = if c then colorStr else const id
+    color = if colorize opts then colorStr else const id
 
     name = torrentName torrent
     size = torrentSize torrent
