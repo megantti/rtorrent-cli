@@ -1,5 +1,5 @@
 rc() {
-	~/.cabal/bin/rcrc $*
+	~/.local/bin/rcrc $*
 	source ~/.rc_sh
 }
 

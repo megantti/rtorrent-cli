@@ -1,4 +1,5 @@
 {-# LANGUAGE TypeOperators, OverloadedStrings, ScopedTypeVariables #-}
+{-# LANGUAGE FlexibleInstances #-}
 
 module Main where
 
@@ -10,6 +11,10 @@ import Data.List (isInfixOf, intercalate)
 import Data.List.Split (splitOn)
 import Data.Char (toLower)
 import Data.Monoid
+import Data.Text (Text)
+import qualified Data.Text as T
+import Data.Vector (Vector)
+import qualified Data.Vector as V
 
 import System.IO (hIsTerminalDevice, stdout)
 import System.Directory
@@ -18,15 +23,16 @@ import System.Environment (lookupEnv)
 import Data.Traversable (traverse)
 
 import Network.RTorrent
-import Network.RTorrent.Action (pureAction, simpleAction)
+import Network.RTorrent.Action (pureAction, simpleAction, Action)
 import Options.Applicative
 
 import Render
+import Network.RTorrent.Value
 
 data Opts = Opts { 
     showFiles :: Bool
   , showChunks :: Bool
-  , nameFilt :: String
+  , nameFilt :: T.Text
   , idFilt :: Int -> Bool
   , quiet :: Bool
   , verbose :: Bool
@@ -42,12 +48,12 @@ data RCommand =
     | CExec String [String]
     | CLoad String
 
-type ChunkInfo = Maybe [Bool] :*: Int
+type ChunkInfo = Maybe (Vector Bool) :*: Int
 
-type TInfo = TorrentInfo :*: [FileInfo] :*: ChunkInfo
+type TInfo = TorrentInfo :*: Vector FileInfo :*: ChunkInfo
 
 parseIdList :: String -> ReadM (Int -> Bool)
-parseIdList = fmap (\fs i -> any ($i) fs) 
+parseIdList = fmap (\fs i -> any ($ i) fs) 
             . traverse check . splitOn ","
   where
     readInt :: String -> ReadM Int
@@ -57,8 +63,8 @@ parseIdList = fmap (\fs i -> any ($i) fs)
     check = cases . splitOn "-" 
       where
         cases c = case c of
-            ["", a] -> (\e i -> i <= e) <$> readInt a
-            [a, ""] -> (\s i -> s <= i) <$> readInt a
+            ["", a] -> (>=) <$> readInt a
+            [a, ""] -> (<=) <$> readInt a
             [a,  b] -> (\s e i -> s <= i && i <= e) 
                         <$> readInt a
                         <*> readInt b
@@ -121,17 +127,16 @@ parse = Opts
         prg = strArgument (metavar "program")
         args = strArgument (metavar "args")
 
-checkName :: String -> a :*: String -> Bool
-checkName find (_ :*: t) = find `isInfixOf` map toLower t
+checkName :: T.Text -> a :*: T.Text -> Bool
+checkName find (_ :*: t) = find `T.isInfixOf` T.toLower t
 
 shFile :: FilePath
 shFile = ".rc_sh"
 
 call :: Command a => a -> IO (Either String (Ret a))
 call command = do
-    host <- fromMaybe "localhost" . filterEmpty <$> lookupEnv "RT_HOST"
-    port <- checkPort =<< fromMaybe "5000" . filterEmpty <$> lookupEnv "RT_PORT"
-    callRTorrent host port command
+    uri <- fromMaybe "tcp://localhost:5000" . filterEmpty <$> lookupEnv "RT_URL"
+    callRTorrent uri command
   where
     filterEmpty (Just "") = Nothing
     filterEmpty a = a
@@ -144,32 +149,35 @@ addPath url = do
     path <- canonicalizePath url
             `catch` (\(_ :: IOException) -> 
                         return url)
-    _ <- call $ loadStartTorrent path
+    _ <- call $ loadStartTorrent (T.pack path)
     return ()
     
-changeDir :: String -> [(a, TorrentInfo :*: b)] -> IO ()
+changeDir :: String -> Vector (a, TorrentInfo :*: b) -> IO ()
 changeDir shFilePath torrents = 
-    case reverse torrents of
-        ((_, t :*: _) : _) -> do
+    case V.unsnoc torrents of
+        Just (_, (_, t :*: _)) -> do
             let dir = torrentDir t 
-            writeFile shFilePath $ "cd '" <> dir <> "'\n"
+            writeFile shFilePath $ "cd '" <> T.unpack dir <> "'\n"
         _ -> return ()
 
-exec :: String -> [String] -> String -> [(a, TorrentInfo :*: [FileInfo] :*: b)] -> IO ()
+exec :: String -> [String] -> String -> Vector (a, TorrentInfo :*: Vector FileInfo :*: b) -> IO ()
 exec program args shFilePath torrents =
-    case reverse torrents of
-        ((_, t :*: (file : _) :*: _) : _) -> do
-            let dir = torrentDir t 
-            writeFile shFilePath $ 
-              intercalate " " (program : args)
-              <> " '" <> dir <> "/" 
-              <> filePath file
-              <> "'"   
+    case V.unsnoc torrents of
+        Just (_, (_, t :*: files :*: _)) -> do
+            case V.uncons files of 
+                Just (file, _) -> do
+                    let dir = T.unpack (torrentDir t)
+                    writeFile shFilePath $ 
+                      intercalate " " (program : args)
+                      <> " '" <> dir <> "/" 
+                      <> T.unpack (filePath file)
+                      <> "'"   
+                _ -> return ()
         _ -> return ()
 
-commandOn :: (TorrentId -> TorrentAction Int) -> [(a, TorrentInfo :*: b)] -> IO ()
+commandOn :: (TorrentId -> TorrentAction Int) -> Vector (a, TorrentInfo :*: b) -> IO ()
 commandOn cmd torrents = void . call $
-    map (\(_, t :*: _) -> cmd (torrentId t)) torrents
+    V.map (\(_, t :*: _) -> cmd (torrentId t)) torrents
 
 filesRequired :: Bool -> Opts -> Bool
 filesRequired doShow opts = (doShow && showFiles opts) || check (cmd opts)
@@ -180,6 +188,9 @@ filesRequired doShow opts = (doShow && showFiles opts) || check (cmd opts)
 getRight :: Either String a -> IO a
 getRight (Right a) = return a
 getRight (Left e) = throwIO $ ErrorCall e 
+
+commandSimpleArray :: T.Text -> Global (Vector T.Text)
+commandSimpleArray = commandSimple
 
 main :: IO ()
 main = do
@@ -201,18 +212,18 @@ main = do
     torrentNames <- getRight =<< 
                         call (allTorrents (getTorrentId <+> getTorrentName))
 
-    let beforeFilter = checkName (map toLower $ nameFilt opts)
+    let beforeFilter = checkName (T.toLower $ nameFilt opts)
     let afterFilter = idFilt opts . fst
-    let torrentsToGet = filter afterFilter 
-                        . zip [1..] 
-                        . filter beforeFilter
+    let torrentsToGet = V.filter afterFilter 
+                        . V.imap (\i v -> (i + 1, v))
+                        . V.filter beforeFilter
                         $ torrentNames
 
     let doShow = (verbose opts || isNothing (cmd opts)) && (not $ quiet opts) 
 
     let getFiles = if filesRequired doShow opts
-            then getTorrentFiles
-            else pureAction []
+            then getTorrentFileInfo
+            else pureAction V.empty
 
     let getChunks = if showChunks opts 
             then getTorrentChunks <+> getTorrentChunkSize
@@ -222,8 +233,8 @@ main = do
                   <+> getFiles
                   <+> getChunks
 
-    torrents <- getRight =<< call (
-        map (\(k, tId :*: _) -> (\d -> (k, d)) <$> getData tId) torrentsToGet)
+    let callTo = V.map (\(k, tId :*: _) -> (\d -> (k, d)) <$> getData tId) torrentsToGet
+    torrents <- getRight =<< call callTo
 
     let renderOpts = RenderOpts {
         colorize = colorize
@@ -232,7 +243,7 @@ main = do
     }
 
     when doShow $ 
-       mapM_ (renderTorrent renderOpts)
+       V.mapM_ (renderTorrent renderOpts)
             torrents
 
     case cmd opts of
