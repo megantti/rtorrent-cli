@@ -201,9 +201,9 @@ main = do
     let parserOpts = info (helper <*> parse)
           ( fullDesc
          <> header "RC - rtorrent cli remote control"
-         <> footer ("Use environment variables RT_HOST and RT_PORT to "
-                   ++ "set host and port, the defaults are localhost and 5000. "
-                   ++ "Note that the commands act on all matching torrents.")
+         <> footer ("Use the environment variabl RT_URL to set the path to UNIX socket as"
+                    ++ " 'unix://~/.rtorrent/socket.rpc'. "
+                    ++ "Note that the commands act on all matching torrents.")
          )
     opts <- execParser parserOpts
 
